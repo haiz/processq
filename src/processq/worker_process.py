@@ -58,27 +58,7 @@ class WorkerProcess(Process):
         while not self.is_expired.value:
             data = await self.pull()
             if data is not None:
-                self.logger.debug(self.f(f"processing {data}"))
-
-                ex = None
-                try:
-                    await execute_func(self.handler, data, **params)
-                except Exception as tex:
-                    ex = tex
-                    self.logger.exception(self.f(f"Worker error on data (retry={self.retry_count}): {data}"))
-
-                if ex and self.retry_count > 0:
-                    ex = None
-                    for i in range(self.retry_count):
-                        try:
-                            await self.retry(data, params)
-                            break
-                        except Exception as tex:
-                            ex = tex
-                            self.logger.exception(self.f(f"Retry {i + 1} error on data {data}."))
-
-                if ex and self.on_failure:
-                    self.on_failure(data, ex)
+                await self._process_data(data, params)
                 empty_queue_waiting_time = 0.1
             else:
                 await asyncio.sleep(empty_queue_waiting_time)
@@ -86,6 +66,29 @@ class WorkerProcess(Process):
                     empty_queue_waiting_time += 0.1
 
         await execute_func(self.on_close, **params)
+
+    async def _process_data(self, data: Any, params):
+        self.logger.debug(self.f(f"processing {data}"))
+
+        ex = None
+        try:
+            await execute_func(self.handler, data, **params)
+        except Exception as tex:
+            ex = tex
+            self.logger.exception(self.f(f"Worker error on data (retry={self.retry_count}): {data}"))
+
+        if ex and self.retry_count > 0:
+            ex = None
+            for i in range(self.retry_count):
+                try:
+                    await self.retry(data, params)
+                    break
+                except Exception as tex:
+                    ex = tex
+                    self.logger.exception(self.f(f"Retry {i + 1} error on data {data}."))
+
+        if ex and self.on_failure:
+            self.on_failure(data, ex)
 
     async def pull(self):
         start_acquire_time = time.time()
@@ -99,11 +102,10 @@ class WorkerProcess(Process):
         if acquire_time > 1:
             self.logger.warning(self.f(f"acquire lock time: {acquire_time}"))
 
-        if self.message_queue.empty():
-            self.queue_lock.release()
-            return None
+        data = None
+        if not self.message_queue.empty():
+            data = self.message_queue.get()
 
-        data = self.message_queue.get()
         self.queue_lock.release()
         return data
 
